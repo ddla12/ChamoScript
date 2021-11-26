@@ -1,5 +1,53 @@
-import { Token, ParseType, Parsed, ParsedToken, VariableExpressionBody, ParserObject, ParsedData, Arithmetic } from "./@types.ts";
-import { ExpressionRegexp, Expressions, RegExpFactory, TypesRegExp } from "./constants.ts";
+import { Token, ParseType, Parsed, ParsedToken, VariableExpressionBody, ParserObject, ParsedData, Type, MultipleVariableExpression, Variables, ObjectExpressionBody, Props, Objetos } from "./@types.ts";
+import { DefaultValues, ExpressionRegexp, Expressions, RegExpFactory, Translations, TypesRegExp } from "./constants.ts";
+
+const program = {
+    type: "Program",
+    body: [] as any[],
+    Variables: [] as Variables[],
+    Objetos: [] as Objetos[],
+    set objetos(values: Objetos[]) {
+        this.objectExists(values);
+        this.Objetos = values;
+    },
+    get objetos() {
+        return this.Objetos;
+    },
+    set variables(value: Variables[]) {
+        this.redeclareOrTyping(value);
+
+        this.Variables = value;
+    },
+    get variables() {
+        return this.Variables;
+    },
+    objectExists(values: Objetos[]) {
+        const justIdentifiers = values.map(({ identifier }) => identifier);
+
+        if(this.Objetos.map(({ identifier }) => identifier).some((id) => justIdentifiers.includes(id))) {
+            throw Error("El objeto ya existe")
+        }
+    },
+    redeclareOrTyping(values: Variables[]) {
+        const justIdentifiers = values.map(({ identifier }) => identifier),
+            typeAndId = values.map(({ type, identifier }) => ({ type, identifier }));
+
+        if(this.variables.some(({ identifier }) => justIdentifiers.includes(identifier))) {
+            throw Error("Error de identificador");
+        }
+
+        if(this.variables.map(({ identifier, type }) => ({ identifier, type }))
+            .find((value) => typeAndId.includes(value))?.type 
+        ) {
+            throw Error("Error de tipo");
+        }
+    },
+    find(id: string): void {
+        if(!(this.variables.find(({ identifier }) => identifier === id))) {
+            throw Error("Variable no existe")
+        }
+    }
+}
 
 const operationParse = (value: string): any => {
     const toArray = (val: string): string[] => val.replace(/^\(|\)$/g, "")
@@ -31,6 +79,13 @@ const Parsers: ParserObject = {
 
         return [tokens, "Number", "ArithmeticOperation"]
     },
+    stringsConcatenation: (value: string): ParsedData<string, "String"> => [
+        value.replace(/^<{2}|>{2}$/g, "").split("+").filter(Boolean).map(
+            (t) => t.trim().replace(/^`|`$/g, "")
+        ).join(""), 
+        "String", 
+        "StringsConcatenation"
+    ],
 };
 
 const matchFactory = (regexp: RegExp, expression: string): string => (expression.match(regexp) || " ")[0].trim();
@@ -52,23 +107,93 @@ function parseToken(value: any): any {
 }
 
 function variableBody(expression: ParsedToken) {
-    const match = (regexp: RegExp) => matchFactory(regexp, expression.value);
+    const match = (regexp: RegExp) => matchFactory(regexp, expression.value),
+        parsedValue = parseToken(match(RegExpFactory.variableValue()));
 
     expression.body = {
-        type        : (expression.type === "ConstantDeclaration") ? "Constant" : "Variable",
-        identifier  : match(RegExpFactory.variableIdentifier()),
+        varType     : (expression.type === "ConstantDeclaration") ? "Constant" : "Variable",
+        identifier  : match(RegExpFactory.identifier()),
         equality    : match(RegExpFactory.equality()),
-        value       : parseToken(match(RegExpFactory.variableValue()))
+        value       : parsedValue,
+        type        : parsedValue[1]
     } as VariableExpressionBody;
 
-    //@ts-ignore
-    console.log(expression.body.value);
+    if(expression.type !== "VariableUpdating") {
+        program.variables = [
+            ...program.variables,
+            (({ type, identifier, varType }: VariableExpressionBody) => ({
+                type,
+                identifier,
+                varType,
+            }))(expression.body as VariableExpressionBody) as Variables
+        ];
+    } else {
+        program.find(expression.body.identifier!);
+    }
+}
+
+function multipleVariables(expression: ParsedToken) {
+    const variables = expression.value.match(/(?<=:)[\s\w,]+/g)! as string[],
+        type = expression.value.match(RegExpFactory.multipleVariableTypes())![0] as Type;
+
+    expression.body = {
+        type,
+        variables: variables.map((identifier): VariableExpressionBody => ({
+            varType: "Variable",
+            identifier: identifier!.trim(),
+            equality: "es igual a",
+            value: parseToken(DefaultValues[type]),
+            type,
+        }))
+    } as MultipleVariableExpression;
+
+    program.variables = [
+        ...program.variables,
+        ...((expression.body as MultipleVariableExpression).variables
+            .map(({ identifier, type, varType }) => ({
+                type: Translations.get(type),
+                identifier: identifier!.trim(),
+                varType,
+            })) as Variables[])
+    ];
+}
+
+function getObjectProps(expression: string): Props {
+    return Object.fromEntries(
+        expression.replace(/^.*{|};$/g, "").trim().split(";").filter(Boolean)
+            .map((prop) => {
+                let typeAndName = prop.split(" ").reverse();
+
+                typeAndName[1] = Translations.get(typeAndName[1])!;
+
+                return typeAndName;
+            })
+    )
+}
+
+function declareObject(expression: ParsedToken) {
+    expression.body = {
+        identifier: matchFactory(RegExpFactory.identifier("object"), expression.value),
+        props: getObjectProps(expression.value),
+        literal: {}
+    } as ObjectExpressionBody;
+
+    program.objetos.push(
+        Object.assign({
+            identifier: expression.body.identifier!,
+            props: (expression.body as ObjectExpressionBody).props,
+        },{})
+    );
 }
 
 function generateBodyOfExpression(expression: ParsedToken) {
     switch(true) {
         case Expressions.Variable.includes(expression.type):
             return variableBody(expression);
+        case (Expressions.MultipleVariable[0] === expression.type):
+            return multipleVariables(expression);
+        case Expressions.Object === expression.type:
+            return declareObject(expression);
         default:
             throw Error("Error");
     }
@@ -81,7 +206,7 @@ function sanitizeExpression(value: string) {
     return value.replace(RegExpFactory.variableValue(), " " + variableVal);
 } 
 
-function generateExpression(tokens: Token[], pos: number): [any, number] {
+function generateExpression(tokens: Token[], pos: number, expressions: any[]): [any, number] {
     let expression: ParsedToken = {
         type: "Invalid",
         value: "",
@@ -107,12 +232,7 @@ function generateExpression(tokens: Token[], pos: number): [any, number] {
     return [expression, pos];
 }
 
-export default function Parser(tokens: Token[]): Parsed {
-    let parsed: Parsed = {
-        type: "Program",
-        body: []
-    }
-
+export default function Parser(tokens: Token[]): any {
     let pos: number = 0;
 
     while(pos < tokens.length) {
@@ -123,12 +243,12 @@ export default function Parser(tokens: Token[]): Parsed {
 
         let expression: any;
 
-        [expression, pos] = generateExpression(tokens, pos);
+        [expression, pos] = generateExpression(tokens, pos, program.body);
 
-        parsed.body.push(expression!);
+        program.body.push(expression!);
 
         pos++;
     }
 
-    return parsed;
+    return program;
 }

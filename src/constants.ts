@@ -1,16 +1,17 @@
-import { ParseType } from "./@types.ts";
+import { ErrorObject } from "./@types.ts";
 
 export const RawRegExp = {
-    IdentifierName: String.raw`((\$|\_|[a-zA-Z])+)[_a-zA-Z0-9]{0,}`,
-    Equality: String.raw`(es igual a|se le suma|se le divide|se le resta|se le multiplica|se eleva a)`
+    IdentifierName: String.raw`([\w$]+)`,
+    Equality: String.raw`(es igual a|se le suma|se le divide|se le resta|se le multiplica|se eleva a)`,
+    Types: String.raw`(Cadena|Arreglo|Objecto|Numero|Booleano)`,
 };
 
 export const TypesRegExp = {
-    isNumber: () => /^-?[0-9]+(\.[0-9]+)?$/,
-    isString: () => /^("|').*\1/s,
-    isArray : () => /^\[\s*([\w\W]+,\s*)*([\w\W]+\s*)*\s*\]$/s,
-    isObject: () => /^\{\s*(((\$|\_|[a-zA-Z])+)[_a-zA-Z0-9]{0,}\s*:\s*[ a-z0-9A-Z"'\[\]]+,{1}\s?)*\s*\}$/s,
-    isArithmeticOperation: () => /(?<=^<)[0-9\+\-\/\*\.\(\)\s]*(?=>$)/
+    isNumber: () => /^[+-]?\d+(\.\d+)?$/,
+    isString: () => /^`[^`]*`$/s,
+    isArray : () => /^\[([\w\W]+,)\s*\]$/s,
+    isArithmeticOperation: () => /(?<=^<)[0-9()+./*-\s]*(?<!>$)/,
+    isStringsConcatenation: () => /(?<=^\<{2}\s*)(\+|`.*`+)(?=\s*\>{2}$)/
 }
 
 export const RegExpFactory = {
@@ -19,9 +20,9 @@ export const RegExpFactory = {
             String.raw`^${keyword}\s*${RawRegExp.IdentifierName}\s*${RawRegExp.Equality}\s*[\S\s]*\;$`
         );
     },
-    variableIdentifier() {
+    identifier(type: "variable"|"object" = "variable") {
         return new RegExp(
-            String.raw`(?<=(ahora|var|siempre)\s)${RawRegExp.IdentifierName}`,
+            String.raw`(?<=${type === "variable" ? "(ahora|var|siempre)" : "Objeto"}\s)${RawRegExp.IdentifierName}`,
         );
     },
     equality: () => new RegExp(RawRegExp.Equality),
@@ -36,48 +37,51 @@ export const RegExpFactory = {
             String.raw`\t|\n|\s+(?=\]|\(|\)|:|,|\[|\(|\{)|\\n|(?<=\]|\(|\)|:|,|\[|\(|\{|;)\s+`,
             "g"
         );
-    }
+    },
+    validArrayElement: (isLast: boolean = false) => {
+        return new RegExp(`^[\w\W]+${!isLast ? ",$" : ",?"}/`, "s");
+    },
+    validObjectElement: (isLast: boolean = false) => {
+        return new RegExp(`^${RawRegExp.IdentifierName}:[\w\W]+${!isLast ? ",$" : ",?"}`, "s");
+    },
+    csType: () => new RegExp(`^${RawRegExp.Types}$`),
+    multipleVariableTypes: () => new RegExp(`${RawRegExp.Types}`)
 };
 
-export const CSKeywords = new Map<string, [string, ParseType]>([
-    [
-        "const", 
-        ["const", "VariableDeclaration"]
-    ],
-    [
-        "var", 
-        ["var", "VariableDeclaration"]
-    ],
-    [
-        "imprimir", 
-        ["console.log", "FunctionCall"]
-    ],
-    [
-        "siempre es",
-        ["=", "Equality"]
-    ]
+export const Translations = new Map([
+    [ "siempre", "const" ],
+    [ "var", "var" ],
+    [ "imprimir", "console.log" ],
+    [ "siempre es|es igual a", "=" ],
+    [ "Cadena", "String" ],
+    [ "Arreglo", "Array" ],
+    [ "Numero", "Number" ],
+    [ "Objeto", "Object"],
+    [ "Booleano", "Boolean" ]
 ]);
 
 export const ExpressionRegexp = {
     VariableDeclaration : RegExpFactory.variable("var"),
     VariableUpdating    : RegExpFactory.variable("ahora"),
     ConstantDeclaration : RegExpFactory.variable("siempre"),
+    MultipleVariableDeclaration: new RegExp(
+        String.raw`^declarar vars tipo ${RawRegExp.Types}:\s*(${RawRegExp.IdentifierName},)*\s*${RawRegExp.IdentifierName}\s*;$`
+    ),
+    ObjectDeclaration: new RegExp(
+        String.raw`^Objeto [\w$]+\s*\{\s*(${RawRegExp.Types}\s*[\w$]+;\s*)*\s*\};$`
+    )
 };
 
 export const TokensRegexp = {
     MultiLineComment: /\/\*|\*\//,
-    IdentifierName: new RegExp(RawRegExp.IdentifierName + "$"),
+    IdentifierName: new RegExp("^" + RawRegExp.IdentifierName + "$"),
     LineTerminator: /\n|\r\n?/,
-    StringLiteral: /(\'|\")/,
-    NumericLiteral: /^-?[0-9]+(\.[0-9]+)?$/,
+    StringLiteral: /(\`)/,
+    NumericLiteral: /^[+-]?\d+(\.\d+)?$/,
     SingleLineComment: /\/\//,
-    Punctuator: /\/|\\|\*|\+|\-|\(|\)|\[|\]|\{|\}|:|;|,|\.|\?|\¿|%|\^|"|'|`|<|>/,
+    Punctuator: /\/|\\|\*|\+|\-|\(|\)|\[|\]|\{|\}|:|;|,|\.|\?|\¿|%|\^|<|>/,
     Whitespace: /\s+|\t+/,
 };
-
-export const ArithmeticSymbol = {
-    addition: "+"
-}
 
 export const JSKeywords = [
     "abstract",
@@ -146,4 +150,38 @@ export const JSKeywords = [
 
 export const Expressions = {
     Variable: ["VariableDeclaration", "VariableUpdating", "ConstantDeclaration"],
+    MultipleVariable: ["MultipleVariableDeclaration"],
+    Object: "ObjectDeclaration"
 };
+
+export const tryCatch = (
+    condition       : boolean,
+    error           : string,
+    errorInstance   : ((message?: string) => Error) = SyntaxError
+): void => {
+    try {
+        if(condition) throw errorInstance(error);        
+    } catch (error) {
+        throw error;
+    }
+};
+
+export const CSErrors: ErrorObject = {
+    tokenizer: {
+        tokenInesperado: (pos: number) => `Token inesperado en la posicion ${pos}`,
+        grupoSinCerrar: (grupo: string) => `Grupo sin cerrar, se esperaba '${grupo}'`,
+    },
+    parser: {
+        elementoInvalido: (element: string, type: "arreglo"|"objeto") => {
+            return `${type === "arreglo" ? "Elemento" : "Propiedad"} de ${type} inválido, ${element}`
+        }
+    }
+};
+
+export const DefaultValues: Record<string, string> = {
+    Cadena   : "",
+    Arreglo  : "[]",
+    Booleano : "falso",
+    Objeto   : "{}"
+};
+

@@ -1,11 +1,17 @@
 import { Token, TokenType } from "./@types.ts";
-import { TokensRegexp } from "./constants.ts";
+import { CSErrors, TokensRegexp, tryCatch } from "./constants.ts";
 
-const closedStack: string[] = [];
-
-const inClosedStack = (value: string) => [`""`, "''", "()", "{}", "[]"].some(
-    (pair) => pair === (closedStack[closedStack.length - 1] + value)
-);
+const ClosedStack = {
+    stack: [] as string[],
+    checkIf(value: string) {
+        return ["``", "()", "{}", "[]"].some(
+            (pair) => pair === (this.lastInStack() + value)
+        )
+    },
+    lastInStack() {
+        return this.stack[this.stack.length - 1];
+    }
+};
 
 const getTokens = (input: string): string[] => input.trim().match(/\n|\s+|\w+|\W/g)!.filter(Boolean);
 
@@ -30,61 +36,62 @@ function getTokenTypes(tokens: string[]): Token[] {
 function checkForSyntaxErrors(tokens: Token[], input: string): void {
     let invalid: number;
 
-    if(Object.values(tokens).some(({ type, value }) => {
+    tryCatch(Object.values(tokens).some(({ type, value }) => {
         if(type === "Invalid") {
             invalid = input.indexOf(value);
             return true;
         }
-    })) {
-        throw SyntaxError(`Token inesperado en la posicion ${invalid!}`);
-    }  
+    }), CSErrors.tokenizer.tokenInesperado(invalid!));
 }
 
 function setClosed(tokens: Token[]): Token[] {
-    let inString: boolean = false,
-        quoteType: string = "";
+    let inString: boolean = false;
 
     return tokens.map(({ type, value }) => {
-        let isGroupToken = `"'{[()]}`.includes(value),
+        let isGroupToken = "`{[()]}".includes(value),
             closed: boolean|undefined;
 
-        if(`"'`.includes(value) && (["", value].includes(quoteType))) {
-            inString = !inString;
-            quoteType = value;
-        }
+        if(ClosedStack.lastInStack() === "`") inString = !inString;
 
-        let isStringValue = (inString && (quoteType !== value));
-
-        if((isGroupToken) && (!isStringValue)) {
-            let inStack = inClosedStack(value);
+        if((isGroupToken) && (!inString)) {
+            let inStack = ClosedStack.checkIf(value);
             
             closed = (inStack);
 
             (inStack)
-                ? closedStack.pop()
-                : closedStack.push(value);
+                ? ClosedStack.stack.pop()
+                : ClosedStack.stack.push(value);
         }
 
         return {
-            type: (isStringValue) ? "StringValue" : type,
+            type: (inString) ? "StringValue" : type,
             value,
             ...((closed !== undefined) && ({ closed })),
-            ...((inString && (isStringValue)) && ({ inString }))
+            ...((inString) && ({ inString }))
         }
     });
 }
 
 function checkForUnclosedTokens(tokens: Token[]): void {
-    const closedVals = tokens.filter(({ closed }) => closed !== undefined).map(({ closed }) => closed);
+    let closedVals: any[] = tokens.filter(({ closed }) => closed !== undefined);
 
-    if(closedVals.filter(Boolean).length !== closedVals.filter((v) => !v).length) {
-        throw SyntaxError("Grupo sin cerrar");
-    }
+    if(!closedVals.length) return;
+
+    closedVals = closedVals.map(({ closed, value }) => ({ closed, value}));
+
+    tryCatch(
+        closedVals.filter(({ closed }) => closed).length !== closedVals.filter(({ closed }) => !(closed)).length,
+        CSErrors.tokenizer.grupoSinCerrar(
+            closedVals[closedVals.map(({ closed }) => closed).lastIndexOf(false)].value
+        )
+    );
 }
 
 export default function Tokenizer(input: string): Token[] {
     let tokens = getTokenTypes(getTokens(input));
 
+    console.log(tokens);
+    
     checkForSyntaxErrors(tokens, input);
 
     tokens = setClosed(tokens);
